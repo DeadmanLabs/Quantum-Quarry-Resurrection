@@ -30,6 +30,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.Container;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
@@ -48,7 +49,11 @@ import java.util.Optional;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import com.google.common.collect.ImmutableList; 
+import com.google.common.collect.ImmutableList;
+
+import com.quantum.quantum_quarry.init.DataComponents;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.core.HolderLookup; 
 
 public class ChunkMiner {
     private static final Logger LOGGER = LoggerFactory.getLogger(ChunkMiner.class);
@@ -62,7 +67,7 @@ public class ChunkMiner {
     public int minedBlocks = 0;
     private ChunkPos currentPos = null;
     private LevelChunk currentChunk = null;
-    private BlockPos.MutableBlockPos nextBlockToMine = null;
+    public BlockPos.MutableBlockPos nextBlockToMine = null;
 
     private static final List<Item> potentialTools = ImmutableList.of(
         Items.DIAMOND_PICKAXE,
@@ -78,19 +83,49 @@ public class ChunkMiner {
     }
 
     public void startMining(ItemStack enchants, ItemStack biome) {
+        ResourceKey<Biome> targetBiome = null;
+        ResourceKey<Level> targetDimension = null;
+        
+        if (biome != null && biome.has(DataComponents.STORED_BIOME.get())) {
+            targetBiome = biome.get(DataComponents.STORED_BIOME.get());
+            targetDimension = getDimensionForBiome(targetBiome);
+            LOGGER.info("Mining with biome filter: {} in dimension: {}", targetBiome.location(), targetDimension.location());
+        }
+        
         ChunkPos randomPos = getRandomChunkPos();
-        LevelChunk chunk = loadChunk(randomPos, null);
+        LevelChunk chunk = loadChunk(randomPos, targetDimension);
+        
+        // If we have a biome filter, keep trying until we find a matching chunk
+        if (targetBiome != null && chunk != null) {
+            ServerLevel targetLevel = level.getServer().getLevel(targetDimension);
+            ResourceKey<Biome> chunkBiome = getBiomeOfChunk(targetLevel, randomPos);
+            int attempts = 0;
+            while (!targetBiome.equals(chunkBiome) && attempts < 100) {
+                unloadChunk(chunk);
+                randomPos = getRandomChunkPos();
+                chunk = loadChunk(randomPos, targetDimension);
+                if (chunk != null) {
+                    chunkBiome = getBiomeOfChunk(targetLevel, randomPos);
+                }
+                attempts++;
+            }
+            if (attempts >= 100) {
+                LOGGER.warn("Could not find chunk with biome {} after 100 attempts", targetBiome.location());
+            }
+        }
+        
         if (chunk != null) {
             currentChunk = chunk;
             currentPos = randomPos;
+            ServerLevel chunkLevel = (ServerLevel) chunk.getLevel();
             nextBlockToMine = new BlockPos.MutableBlockPos(
                 chunk.getPos().getMinBlockX(),
-                level.getMinBuildHeight(),
+                chunkLevel.getMinBuildHeight(),
                 chunk.getPos().getMinBlockZ()
             );
-            currentBiome = getBiomeOfChunk(level, randomPos);
-            currentHolder = getBiomeHolderOfChunk(level, randomPos);
-            LOGGER.info("Started mining chunk: {}", randomPos);
+            currentBiome = getBiomeOfChunk(chunkLevel, randomPos);
+            currentHolder = getBiomeHolderOfChunk(chunkLevel, randomPos);
+            LOGGER.info("Started mining chunk: {} with biome: {}", randomPos, currentBiome != null ? currentBiome.location() : "unknown");
         }
     }
 
@@ -128,8 +163,10 @@ public class ChunkMiner {
 
     private void unloadChunk(LevelChunk chunk) {
         Level targetLevel = chunk.getLevel();
-        ServerChunkCache chunkCache = level.getChunkSource();
-        chunkCache.removeRegionTicket(TicketType.UNKNOWN, chunk.getPos(), 0, chunk.getPos());
+        if (targetLevel instanceof ServerLevel serverLevel) {
+            ServerChunkCache chunkCache = serverLevel.getChunkSource();
+            chunkCache.removeRegionTicket(TicketType.UNKNOWN, chunk.getPos(), 0, chunk.getPos());
+        }
         this.currentPos = null;
         LOGGER.info("Unloaded chunk at position: {} in dimension: {}", chunk.getPos(), targetLevel.dimension().location());
     }
@@ -147,8 +184,24 @@ public class ChunkMiner {
                 fluidsToGive.add(fluidStack);
             } else { //We are assuming its impossible to have a block and fluid source at the same position
                 BlockEntity blockEntity = currentChunk.getBlockEntity(nextBlockToMine);
-                List<ItemStack> drops = Block.getDrops(state, level, nextBlockToMine, blockEntity, null, getEnchantedTool(level, state, enchants));
+                ServerLevel chunkLevel = (ServerLevel) currentChunk.getLevel();
+                
+                // Get the appropriate tool for this block
+                ItemStack tool = getEnchantedTool(chunkLevel, state, enchants);
+                
+                // Get block drops (this includes the block itself and any special drops)
+                List<ItemStack> drops = Block.getDrops(state, chunkLevel, nextBlockToMine, blockEntity, null, tool);
                 itemsToGive.addAll(drops);
+                
+                // If this is a container, also get its contents
+                if (blockEntity instanceof Container container) {
+                    for (int i = 0; i < container.getContainerSize(); i++) {
+                        ItemStack item = container.getItem(i);
+                        if (!item.isEmpty()) {
+                            itemsToGive.add(item.copy());
+                        }
+                    }
+                }
             }
         } else {
             while (block == Blocks.AIR) {
@@ -169,9 +222,10 @@ public class ChunkMiner {
         if (nextBlockToMine == null || currentChunk == null) {
             return;
         }
+        ServerLevel chunkLevel = (ServerLevel) currentChunk.getLevel();
         nextBlockToMine.move(0, 1, 0);
-        if (nextBlockToMine.getY() >= level.getMaxBuildHeight()) {
-            nextBlockToMine.move(1, level.getMinBuildHeight() - nextBlockToMine.getY(), 0);
+        if (nextBlockToMine.getY() >= chunkLevel.getMaxBuildHeight()) {
+            nextBlockToMine.move(1, chunkLevel.getMinBuildHeight() - nextBlockToMine.getY(), 0);
             if (nextBlockToMine.getX() > currentChunk.getPos().getMaxBlockX()) {
                 nextBlockToMine.move(currentChunk.getPos().getMinBlockX() - nextBlockToMine.getX(), 0, 1);
                 if (nextBlockToMine.getZ() > currentChunk.getPos().getMaxBlockZ()) {
@@ -184,7 +238,10 @@ public class ChunkMiner {
     }
 
     private ItemStack getEnchantedTool(ServerLevel level, BlockState state, ItemStack enchants) {
-        ItemStack tool = new ItemStack(Items.DIAMOND_PICKAXE);
+        // Select the optimal tool for the block
+        ItemStack tool = new ItemStack(Items.DIAMOND_PICKAXE); // Default tool
+        
+        // Check each potential tool to find the best one
         for (Item toolItem : potentialTools) {
             ItemStack toolStack = new ItemStack(toolItem);
             if (toolStack.isCorrectToolForDrops(state)) {
@@ -192,14 +249,23 @@ public class ChunkMiner {
                 break;
             }
         }
+        
+        // Apply enchantments from the book, but only if they're valid for this tool
         if (enchants != null && enchants.getItem() == Items.ENCHANTED_BOOK) {
-            ItemEnchantments enchantments = EnchantmentHelper.getEnchantmentsForCrafting(enchants);
-            for (var entry : enchantments.entrySet()) {
+            ItemEnchantments bookEnchantments = EnchantmentHelper.getEnchantmentsForCrafting(enchants);
+            
+            for (var entry : bookEnchantments.entrySet()) {
                 Holder<Enchantment> enchantmentHolder = entry.getKey();
-                int enchantLevel = enchantments.getLevel(enchantmentHolder);
-                tool.enchant(enchantmentHolder, enchantLevel);
+                Enchantment enchantment = enchantmentHolder.value();
+                int enchantLevel = bookEnchantments.getLevel(enchantmentHolder);
+                
+                // Check if this enchantment can be applied to this tool
+                if (enchantment.canEnchant(tool)) {
+                    tool.enchant(enchantmentHolder, enchantLevel);
+                }
             }
         }
+        
         return tool;
     }
 
@@ -211,6 +277,28 @@ public class ChunkMiner {
         );
         Random random = new Random();
         return dimensions.get(random.nextInt(dimensions.size()));
+    }
+
+    private ResourceKey<Level> getDimensionForBiome(ResourceKey<Biome> biome) {
+        if (biome == null) {
+            return getRandomDimension();
+        }
+        
+        String biomePath = biome.location().getPath();
+        
+        // Nether biomes
+        if (biomePath.contains("nether") || biomePath.contains("warped") || biomePath.contains("crimson") || 
+            biomePath.contains("basalt") || biomePath.contains("soul")) {
+            return ResourceKey.create(Registries.DIMENSION, ResourceLocation.fromNamespaceAndPath("quantum_quarry", "nether_dimension_mock"));
+        }
+        
+        // End biomes
+        if (biomePath.contains("end") || biomePath.equals("the_void")) {
+            return ResourceKey.create(Registries.DIMENSION, ResourceLocation.fromNamespaceAndPath("quantum_quarry", "end_dimension_mock"));
+        }
+        
+        // Default to overworld for all other biomes
+        return ResourceKey.create(Registries.DIMENSION, ResourceLocation.fromNamespaceAndPath("quantum_quarry", "overworld_dimension_mock"));
     }
 
     public String getHumanReadableBiomeName() {
@@ -235,5 +323,55 @@ public class ChunkMiner {
 
     public static Holder<Biome> getBiomeHolderOfChunk(ServerLevel level, ChunkPos pos) {
         return level.getChunk(pos.x, pos.z).getNoiseBiome(((pos.x << 4) + 8) >> 2, 0, ((pos.z << 4) + 8) >> 2);
+    }
+
+    public void resetForNewBiome() {
+        if (currentChunk != null) {
+            unloadChunk(currentChunk);
+        }
+        currentChunk = null;
+        currentPos = null;
+        nextBlockToMine = null;
+        currentBiome = null;
+        currentHolder = null;
+        LOGGER.info("Reset chunk miner for new biome selection");
+    }
+
+    public CompoundTag serializeNBT(HolderLookup.Provider provider) {
+        CompoundTag tag = new CompoundTag();
+        tag.putInt("minedBlocks", this.minedBlocks);
+        if (currentPos != null) {
+            tag.putLong("currentChunkX", currentPos.x);
+            tag.putLong("currentChunkZ", currentPos.z);
+        }
+        if (nextBlockToMine != null) {
+            tag.putInt("nextX", nextBlockToMine.getX());
+            tag.putInt("nextY", nextBlockToMine.getY());
+            tag.putInt("nextZ", nextBlockToMine.getZ());
+        }
+        if (currentBiome != null) {
+            tag.putString("currentBiome", currentBiome.location().toString());
+        }
+        return tag;
+    }
+
+    public void deserializeNBT(CompoundTag tag, HolderLookup.Provider provider) {
+        this.minedBlocks = tag.getInt("minedBlocks");
+        if (tag.contains("currentChunkX") && tag.contains("currentChunkZ")) {
+            ChunkPos pos = new ChunkPos((int)tag.getLong("currentChunkX"), (int)tag.getLong("currentChunkZ"));
+            currentChunk = loadChunk(pos, null);
+            if (currentChunk != null) {
+                currentPos = pos;
+                currentBiome = getBiomeOfChunk(level, pos);
+                currentHolder = getBiomeHolderOfChunk(level, pos);
+            }
+        }
+        if (tag.contains("nextX") && tag.contains("nextY") && tag.contains("nextZ")) {
+            nextBlockToMine = new BlockPos.MutableBlockPos(
+                tag.getInt("nextX"),
+                tag.getInt("nextY"), 
+                tag.getInt("nextZ")
+            );
+        }
     }
 }

@@ -85,9 +85,9 @@ public class MinerBlock extends Block implements EntityBlock {
     public InteractionResult useWithoutItem(BlockState state, Level world, BlockPos pos, Player player, BlockHitResult hit) {
         BlockPos quarry = FindCore.execute(world, pos.getX(), pos.getY(), pos.getZ());
         if (quarry != null && world.getBlockState(quarry).getBlock() instanceof QuarryBlock quarryBlock) {
-            quarryBlock.useWithoutItem(state, world, quarry, player, hit);
+            return quarryBlock.useWithoutItem(world.getBlockState(quarry), world, quarry, player, hit);
         }
-        return InteractionResult.sidedSuccess(world.isClientSide);
+        return InteractionResult.PASS;
     }
 
     @Override
@@ -105,25 +105,24 @@ public class MinerBlock extends Block implements EntityBlock {
     @Override
     public void neighborChanged(BlockState state, Level level, BlockPos pos, Block block, BlockPos fromPos, boolean isMoving) {
         super.neighborChanged(state, level, pos, block, fromPos, isMoving);
-        boolean isPowered = level.hasNeighborSignal(pos);
         if (!level.isClientSide) {
-            LOGGER.info("Miner Block Redstone State Changed at {}: Powered = {}", pos, isPowered);
-            level.updateNeighborsAt(pos, this);
-            BlockPos quarry = FindCore.execute(level, pos.getX(), pos.getY(), pos.getZ());
-            if (quarry != null && level.getBlockState(quarry).getBlock() instanceof QuarryBlock quarryBlock) {
-                quarryBlock.notifyQuarryBlock(level, quarry, isPowered);
-            }
-        }
-        if (!level.isClientSide) {
-            BlockEntity blockEntity = level.getBlockEntity(pos);
-            if (blockEntity instanceof MinerBlockEntity minerEntity) {
-                for (Direction direction : Direction.values()) {
-                    BlockPos adjacentPos = pos.relative(direction);
-                    BlockEntity adjacentEntity = level.getBlockEntity(adjacentPos);
-                    if (adjacentEntity instanceof QuarryBlockEntity) {
-                        minerEntity.setLinkedQuarryPos(adjacentPos);
-                        LOGGER.info("Set Linked Quarry to {}", minerEntity.getLinkedQuarryPos());
-                        break;
+            boolean isPowered = level.hasNeighborSignal(pos);
+            boolean currentPowered = state.getValue(POWERED);
+            
+            // Only update if the powered state actually changed
+            if (isPowered != currentPowered) {
+                LOGGER.info("Miner Block Redstone State Changed at {}: Powered = {}", pos, isPowered);
+                level.setBlock(pos, state.setValue(POWERED, isPowered), 3);
+                
+                // Find and notify the quarry
+                BlockEntity blockEntity = level.getBlockEntity(pos);
+                if (blockEntity instanceof MinerBlockEntity minerEntity) {
+                    BlockPos quarryPos = minerEntity.getLinkedQuarryPos();
+                    if (quarryPos != null) {
+                        BlockEntity quarryEntity = level.getBlockEntity(quarryPos);
+                        if (quarryEntity instanceof QuarryBlockEntity quarryBlockEntity) {
+                            quarryBlockEntity.updateMinerState(pos, isPowered);
+                        }
                     }
                 }
             }

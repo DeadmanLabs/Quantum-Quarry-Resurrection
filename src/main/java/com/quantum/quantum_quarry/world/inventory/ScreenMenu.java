@@ -132,7 +132,7 @@ public class ScreenMenu extends AbstractContainerMenu implements Supplier<Map<In
                 } else {
                     LOGGER.info("Set Slot 1 to Empty!");
                     if (boundBlockEntity != null && boundBlockEntity instanceof QuarryBlockEntity quarryEntity) {
-                        quarryEntity.setEnchants(null);
+                        quarryEntity.setBiome(null);
                         LOGGER.info("Quarry Set!");
                     }
                 }

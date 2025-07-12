@@ -3,7 +3,7 @@
     "gui.quantum_quarry.quantum_miner_screen.label_quantum_miner": "Quantum Miner",
     "item_group.quantum_quarry.quantum_miner": "Quantum Miner",
     "block.quantum_quarry.miner": "Miner",
-    "gui.quantum_quarry.quantum_miner_screen.label_quarry_level": "Quarry Level: ",
+    "gui.quantum_quarry.quantum_miner_screen.label_quarry_level": "Y-Level:",
     "item.quantum_quarry.magic_snow_globe": "Magic Snow Globe",
     "item.quantum_quarry.snow_globe": "Snow Globe",
     "gui.quantum_quarry.quantum_miner_screen.label_01": "0",

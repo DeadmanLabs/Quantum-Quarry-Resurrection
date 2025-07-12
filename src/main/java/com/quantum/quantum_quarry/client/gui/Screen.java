@@ -34,6 +34,7 @@ public class Screen extends AbstractContainerScreen<ScreenMenu> {
     private int quarryCache;
     private String quarryBlocksMined;
     private String quarryBiomeType;
+    private String quarryLevelText;
 
     public Screen(ScreenMenu container, Inventory inventory, Component text) {
         super(container, inventory, text);
@@ -48,6 +49,7 @@ public class Screen extends AbstractContainerScreen<ScreenMenu> {
         this.quarryCache = 0;
         this.quarryBlocksMined = "";
         this.quarryBiomeType = "";
+        this.quarryLevelText = "";
     }
 
     private static final ResourceLocation texture = ResourceLocation.fromNamespaceAndPath("quantum_quarry", "textures/screens/quantum_miner_screen.png");
@@ -112,7 +114,7 @@ public class Screen extends AbstractContainerScreen<ScreenMenu> {
         guiGraphics.drawString(this.font, Component.translatable("gui.quantum_quarry.quantum_miner_screen.label_quarry_level"), 24, 17, -12829636, false);
         guiGraphics.drawString(this.font, Component.translatable("gui.quantum_quarry.quantum_miner_screen.label_blocks_mined"), 24, 28, -12829636, false);
         guiGraphics.drawString(this.font, Component.translatable("gui.quantum_quarry.quantum_miner_screen.label_biome"), 24, 39, -12829636, false);
-        guiGraphics.drawString(this.font, Component.literal("X"), 93, 18, -12829636, false);
+        guiGraphics.drawString(this.font, Component.literal(this.quarryLevelText), 70, 18, -12829636, false);
         guiGraphics.drawString(this.font, Component.literal(this.quarryBlocksMined), 93, 28, -12829636, false);
         guiGraphics.drawString(this.font, Component.literal(this.quarryBiomeType), 56, 39, -12829636, false);
     }
@@ -140,5 +142,6 @@ public class Screen extends AbstractContainerScreen<ScreenMenu> {
         this.quarryCache = this.quarryEntity.mode; //Only call per tick to not overwhelm the system
         this.quarryBlocksMined = String.valueOf(this.quarryEntity.blocksMined);
         this.quarryBiomeType = this.quarryEntity.biomeText;
+        this.quarryLevelText = String.valueOf(this.quarryEntity.quarryLevel);
     }
 }

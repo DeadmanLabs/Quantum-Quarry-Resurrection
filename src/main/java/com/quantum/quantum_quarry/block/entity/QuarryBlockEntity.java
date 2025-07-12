@@ -41,6 +41,10 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.neoforged.neoforge.energy.EnergyStorage;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.items.wrapper.SidedInvWrapper;
+import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.world.item.enchantment.EnchantmentHelper;
+import net.minecraft.world.item.enchantment.ItemEnchantments;
+import net.minecraft.world.item.Items;
 
 import java.util.Map;
 import java.util.HashMap;
@@ -58,6 +62,7 @@ public class QuarryBlockEntity extends RandomizableContainerBlockEntity implemen
 
     public int mode;
     public int blocksMined;
+    public int quarryLevel;
     public String biomeText;
 
     private NonNullList<ItemStack> stacks = NonNullList.<ItemStack>withSize(2, ItemStack.EMPTY);
@@ -68,6 +73,7 @@ public class QuarryBlockEntity extends RandomizableContainerBlockEntity implemen
         this.location = pos;
         this.mode = 0;
         this.blocksMined = 0;
+        this.quarryLevel = this.level != null ? this.level.getMinBuildHeight() : -64;
         this.biomeText = "";
     }
 
@@ -84,10 +90,7 @@ public class QuarryBlockEntity extends RandomizableContainerBlockEntity implemen
             if (player != null) {
                 BlockPos core = FindCore.execute(level, pos.getX(), pos.getY(), pos.getZ()); //ensure that we are using the core for validation
                 if (FindCore.validateStructure(level, core)) {
-                    if (
-                        evaluateRedstone(blockEntity) && 
-                        blockEntity.energyStorage.extractEnergy(1, true) == 1
-                    ) {
+                    if (evaluateRedstone(blockEntity)) {
                         boolean canMine = true;
                         if (!blockEntity.manager.itemsToGive.isEmpty()) {
                             BlockPos[] storages = FindCore.findStorage(level, core);
@@ -127,18 +130,45 @@ public class QuarryBlockEntity extends RandomizableContainerBlockEntity implemen
                             });
                         }
                         if (canMine) {
-                            boolean mined = blockEntity.manager.mineNextBlock(blockEntity.bookSlot);
-                            if (!mined) {
-                                blockEntity.manager.startMining(blockEntity.bookSlot, blockEntity.biomeSlot);
-                                mined = blockEntity.manager.mineNextBlock(blockEntity.bookSlot);
-                            }
-                            if (mined) {
-                                blockEntity.energyStorage.extractEnergy(1, false);
-                                blockEntity.manager.minedBlocks++;
-                                blockEntity.blocksMined = blockEntity.manager.minedBlocks;
-                                blockEntity.level.sendBlockUpdated(blockEntity.worldPosition, blockEntity.getBlockState(), blockEntity.getBlockState(), 3);
-                            } else {
-                                LOGGER.warn("No blocks available to mine or no valid mining target!");
+                            // Calculate blocks to mine based on efficiency
+                            int efficiencyLevel = blockEntity.getEfficiencyLevel();
+                            int blocksToMine = 1 + efficiencyLevel; // 1 block base + 1 per efficiency level
+                            int powerCost = 1 + efficiencyLevel; // 1 RF base + 1 per efficiency level
+                            
+                            // Check if we have enough power for all blocks
+                            if (blockEntity.energyStorage.extractEnergy(powerCost, true) == powerCost) {
+                                int blocksMined = 0;
+                                
+                                for (int i = 0; i < blocksToMine; i++) {
+                                    boolean mined = blockEntity.manager.mineNextBlock(blockEntity.bookSlot);
+                                    if (!mined && i == 0) {
+                                        // Only start new mining on first block
+                                        blockEntity.manager.startMining(blockEntity.bookSlot, blockEntity.biomeSlot);
+                                        mined = blockEntity.manager.mineNextBlock(blockEntity.bookSlot);
+                                    }
+                                    
+                                    if (mined) {
+                                        blocksMined++;
+                                        blockEntity.manager.minedBlocks++;
+                                    } else {
+                                        // No more blocks to mine in this chunk
+                                        break;
+                                    }
+                                }
+                                
+                                if (blocksMined > 0) {
+                                    // Extract power for blocks actually mined
+                                    int actualPowerCost = blocksMined * (1 + efficiencyLevel) / blocksToMine;
+                                    if (actualPowerCost < 1) actualPowerCost = 1;
+                                    blockEntity.energyStorage.extractEnergy(actualPowerCost, false);
+                                    
+                                    blockEntity.blocksMined = blockEntity.manager.minedBlocks;
+                                    blockEntity.updateQuarryLevel();
+                                    blockEntity.updateBiomeText();
+                                    blockEntity.level.sendBlockUpdated(blockEntity.worldPosition, blockEntity.getBlockState(), blockEntity.getBlockState(), 3);
+                                } else {
+                                    LOGGER.warn("No blocks available to mine or no valid mining target!");
+                                }
                             }
                         } else {
                             LOGGER.info("Mining Halted: storage unavailable for items or fluids.");
@@ -183,9 +213,13 @@ public class QuarryBlockEntity extends RandomizableContainerBlockEntity implemen
         tag.put("energyStorage", energyStorage.serializeNBT(provider));
         tag.putInt("mode", this.mode);
         tag.putInt("mined", this.blocksMined);
+        tag.putInt("quarryLevel", this.quarryLevel);
         tag.putString("BiomeText", this.biomeText);
         if (this.owner != null) {
             tag.putUUID("Owner", this.owner);
+        }
+        if (this.manager != null) {
+            tag.put("chunkMiner", this.manager.serializeNBT(provider));
         }
     }
 
@@ -204,7 +238,12 @@ public class QuarryBlockEntity extends RandomizableContainerBlockEntity implemen
         }
         this.mode = tag.getInt("mode");
         this.blocksMined = tag.getInt("mined");
+        this.quarryLevel = tag.getInt("quarryLevel");
+        if (this.quarryLevel == 0) this.quarryLevel = this.level != null ? this.level.getMinBuildHeight() : -64; // Default for old saves
         this.biomeText = tag.getString("BiomeText");
+        if (tag.contains("chunkMiner") && this.manager != null) {
+            this.manager.deserializeNBT(tag.getCompound("chunkMiner"), provider);
+        }
     }
 
     public void cycleMode() {
@@ -359,5 +398,32 @@ public class QuarryBlockEntity extends RandomizableContainerBlockEntity implemen
 
     public void setBiome(ItemStack biomeMarker) {
         this.biomeSlot = biomeMarker;
+        if (this.manager != null) {
+            this.manager.resetForNewBiome();
+        }
+    }
+
+    private void updateQuarryLevel() {
+        if (this.manager != null && this.manager.nextBlockToMine != null) {
+            int newLevel = this.manager.nextBlockToMine.getY();
+            if (newLevel != this.quarryLevel) {
+                this.quarryLevel = newLevel;
+                this.level.sendBlockUpdated(this.worldPosition, this.getBlockState(), this.getBlockState(), 3);
+            }
+        }
+    }
+
+    private void updateBiomeText() {
+        if (this.manager != null) {
+            this.biomeText = this.manager.getHumanReadableBiomeName();
+        }
+    }
+
+    private int getEfficiencyLevel() {
+        if (this.bookSlot != null && this.bookSlot.getItem() == Items.ENCHANTED_BOOK) {
+            ItemEnchantments enchantments = EnchantmentHelper.getEnchantmentsForCrafting(this.bookSlot);
+            return enchantments.getLevel(level.registryAccess().holderOrThrow(Enchantments.EFFICIENCY));
+        }
+        return 0;
     }
 }
